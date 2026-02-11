@@ -19,6 +19,14 @@ const config = {
     port: 1433
 };
 
+app.get('/api/eho/send-count', async (req, res) => {
+    let pool = await sql.connect(config);
+    let result = await pool.request().query(`
+                SELECT COUNT(*) AS COUNT FROM [dbo].[D17_DailySale] WHERE [HO] = '0'
+            `);
+    res.json(result.recordset);
+});
+
 // sys_control ကို date range ဖြင့် ရှာဖွေသည့် API
 app.get('/api/system-control/search', async (req, res) => {
     try {
