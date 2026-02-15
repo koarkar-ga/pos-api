@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const sql = require('mssql');
 const cors = require('cors');
 
@@ -31,7 +31,6 @@ app.get('/api/eho/send-count', async (req, res) => {
 app.get('/api/system-control/search', async (req, res) => {
     try {
         const { start, end } = req.query; // Flutter မှ ?start=...&end=... ပုံစံဖြင့် ပို့ရမည်
-
         let pool = await sql.connect(config);
         let result = await pool.request()
             .input('startTime', sql.DateTime, start) // DateTime အဖြစ် သတ်မှတ်
@@ -40,10 +39,11 @@ app.get('/api/system-control/search', async (req, res) => {
                 SELECT [Sdate], [soption], [HO] 
                 FROM [dbo].[sys_control]
                 WHERE [Sdate] BETWEEN @startTime AND @endTime
-                ORDER BY [Sdate] DESC
+                ORDER BY [Sdate] ASC
             `);
 
-        res.json(result.recordset);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result.recordset);
     } catch (err) {
         console.error("Database Error:", err);
         res.status(500).send(err.message);
@@ -55,21 +55,47 @@ app.get('/api/sales/recent', async (req, res) => {
     try {
         let pool = await sql.connect(config);
         let result = await pool.request().query(`
-                SELECT TOP (20) S.[VocNo], S.[S_Date], S.[Vehical_No], 
-                       S.[SALELITER], S.[TotalPrice], T.[Sale_Type_name], F.[FuelTypeName],
-                       P.[Price] AS TodayPrice
-                FROM [dbo].[D17_DailySale] AS S
-                LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
-                LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
-                OUTER APPLY (
-                    SELECT TOP 1 Price 
-                    FROM D16_PetrolPrice 
-                    WHERE FuelTypeCode = s.FuelTypeCode 
-                    ORDER BY S_Date DESC, PID DESC
-                ) p
-                ORDER BY S.[S_Date] DESC
+                WITH LatestPrices AS (
+                        SELECT FuelTypeCode, Price,
+                            ROW_NUMBER() OVER (PARTITION BY FuelTypeCode ORDER BY S_Date DESC, PID DESC) as rn
+                        FROM [dbo].[D16_PetrolPrice]
+                    )
+                    SELECT TOP (20)
+                        S.[VocNo], S.[S_Date], S.[Vehical_No],
+                        C.[cate_name] AS Category,
+                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        T.[Sale_Type_name],
+                        LP.[Price] AS TodayPrice,
+                        H.[NZ_label] AS Nozzle,
+                        S.[Pump_No] AS Pump,
+                        D.[Pump_Name] AS PumpName,
+                        S.[Hose_Meter_Volume] AS MeterVolume,
+                        S.[Hose_Meter_Value] AS MeterValue,
+                        S.[Pump_Staff] AS CashierName,
+                        CT.[Counter_Name] AS SaleCounter,
+                        S.[SaleGallon], S.[discount], S.[tax_value] AS AfterTax,
+                        -- EP.VocNo နဲ့ မကိုက်ရင် E.e_Payment_name က NULL ဖြစ်နေမှာမလို့ '' ပြောင်းပေးမယ်
+                        ISNULL(E.[e_Payment_name], '') AS ePayment 
+                    FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
+                    LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
+                    LEFT JOIN [dbo].[D99_Category] AS C ON S.Currency_Code = C.cate_code
+                    LEFT JOIN [dbo].[D10_Hose] AS H ON S.Hose_ID = H.Hose_ID
+                    LEFT JOIN [dbo].[D10_Pump] AS D ON S.Pump_No = D.Pump_No
+                    LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
+                    LEFT JOIN [dbo].[D7_Counter] AS CT ON S.Counter_Code = CT.Counter_Code
+                    -- Sale Table နဲ့ Payment Table ကို VocNo နဲ့ ချိတ်မယ်
+                    LEFT JOIN [dbo].[D17_Sale_e_Payment] AS EP ON S.VocNo = EP.VocNo AND T.[Sale_Type_name] = 'ePayment'
+                    -- EP နဲ့ ချိတ်မိမှသာ Payment Name Table ကို ဆက်ချိတ်မယ်
+                    LEFT JOIN [dbo].[D14_e_Payment] AS E ON EP.e_Payment_ID = E.e_Payment_ID
+                    LEFT JOIN LatestPrices AS LP ON S.FuelTypeCode = LP.FuelTypeCode AND LP.rn = 1
+                    ORDER BY S.[S_Date] DESC;
             `);
-        res.json(result.recordset);
+        res.setHeader('X-Total-Count', result.recordset.length);
+        res.setHeader('Content-Type', 'application/json');
+        result.recordset.forEach((row, index) => {
+            res.write(JSON.stringify(row) + "\n"); // တစ်ကြောင်းချင်းစီကို Newline နဲ့ ပို့ခြင်း
+        });
+        res.end();
     } catch (err) {
         res.status(500).send(err.message);
     }
@@ -87,22 +113,104 @@ app.get('/api/sales/search', async (req, res) => {
             .input('start', sql.DateTime, startDate) // DateTime အဖြစ် လက်ခံ
             .input('end', sql.DateTime, endDate)
             .query(`
-                SELECT S.[VocNo], S.[S_Date], S.[Vehical_No], 
-                       S.[SALELITER], S.[TotalPrice], T.[Sale_Type_name], F.[FuelTypeName],
-                       P.[Price] AS TodayPrice
-                FROM [dbo].[D17_DailySale] AS S
-                LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
-                LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
-                OUTER APPLY (
-                    SELECT TOP 1 Price 
-                    FROM D16_PetrolPrice 
-                    WHERE FuelTypeCode = s.FuelTypeCode 
-                    ORDER BY S_Date DESC, PID DESC
-                ) p
-                WHERE S.[S_Date] BETWEEN @start AND @end
-                ORDER BY S.[S_Date] DESC
+                WITH LatestPrices AS (
+                        SELECT FuelTypeCode, Price,
+                            ROW_NUMBER() OVER (PARTITION BY FuelTypeCode ORDER BY S_Date DESC, PID DESC) as rn
+                        FROM [dbo].[D16_PetrolPrice]
+                    )
+                    SELECT 
+                        S.[VocNo], S.[S_Date], S.[Vehical_No],
+                        C.[cate_name] AS Category,
+                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        T.[Sale_Type_name],
+                        LP.[Price] AS TodayPrice,
+                        H.[NZ_label] AS Nozzle,
+                        S.[Pump_No] AS Pump,
+                        D.[Pump_Name] AS PumpName,
+                        S.[Hose_Meter_Volume] AS MeterVolume,
+                        S.[Hose_Meter_Value] AS MeterValue,
+                        S.[Pump_Staff] AS CashierName,
+                        CT.[Counter_Name] AS SaleCounter,
+                        S.[SaleGallon], S.[discount], S.[tax_value] AS AfterTax,
+                        -- EP.VocNo နဲ့ မကိုက်ရင် E.e_Payment_name က NULL ဖြစ်နေမှာမလို့ '' ပြောင်းပေးမယ်
+                        ISNULL(E.[e_Payment_name], '') AS ePayment 
+                    FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
+                    LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
+                    LEFT JOIN [dbo].[D99_Category] AS C ON S.Currency_Code = C.cate_code
+                    LEFT JOIN [dbo].[D10_Hose] AS H ON S.Hose_ID = H.Hose_ID
+                    LEFT JOIN [dbo].[D10_Pump] AS D ON S.Pump_No = D.Pump_No
+                    LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
+                    LEFT JOIN [dbo].[D7_Counter] AS CT ON S.Counter_Code = CT.Counter_Code
+                    -- Sale Table နဲ့ Payment Table ကို VocNo နဲ့ ချိတ်မယ်
+                    LEFT JOIN [dbo].[D17_Sale_e_Payment] AS EP ON S.VocNo = EP.VocNo AND T.[Sale_Type_name] = 'ePayment'
+                    -- EP နဲ့ ချိတ်မိမှသာ Payment Name Table ကို ဆက်ချိတ်မယ်
+                    LEFT JOIN [dbo].[D14_e_Payment] AS E ON EP.e_Payment_ID = E.e_Payment_ID
+                    LEFT JOIN LatestPrices AS LP ON S.FuelTypeCode = LP.FuelTypeCode AND LP.rn = 1
+                    WHERE S.[S_Date] BETWEEN @start AND @end
+                    ORDER BY S.[S_Date] DESC;
             `);
-        res.json(result.recordset);
+        res.setHeader('X-Total-Count', result.recordset.length);
+        res.setHeader('Content-Type', 'application/json');
+        result.recordset.forEach((row, index) => {
+            res.write(JSON.stringify(row) + "\n"); // တစ်ကြောင်းချင်းစီကို Newline နဲ့ ပို့ခြင်း
+        });
+        res.end();
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
+});
+app.get('/api/salesdetail/search', async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+
+        let pool = await sql.connect(config);
+
+        let result = await pool.request()
+            .input('start', sql.DateTime, startDate) // DateTime အဖြစ် လက်ခံ
+            .input('end', sql.DateTime, endDate)
+            .query(`
+                    WITH LatestPrices AS (
+                        SELECT FuelTypeCode, Price,
+                            ROW_NUMBER() OVER (PARTITION BY FuelTypeCode ORDER BY S_Date DESC, PID DESC) as rn
+                        FROM [dbo].[D16_PetrolPrice]
+                    )
+                    SELECT 
+                        S.[VocNo], S.[S_Date], S.[Vehical_No],
+                        C.[cate_name] AS Category,
+                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        T.[Sale_Type_name],
+                        LP.[Price] AS TodayPrice,
+                        H.[NZ_label] AS Nozzle,
+                        S.[Pump_No] AS Pump,
+                        D.[Pump_Name] AS PumpName,
+                        S.[Hose_Meter_Volume] AS MeterVolume,
+                        S.[Hose_Meter_Value] AS MeterValue,
+                        S.[Pump_Staff] AS CashierName,
+                        CT.[Counter_Name] AS SaleCounter,
+                        S.[SaleGallon], S.[discount], S.[tax_value] AS AfterTax,
+                        -- EP.VocNo နဲ့ မကိုက်ရင် E.e_Payment_name က NULL ဖြစ်နေမှာမလို့ '' ပြောင်းပေးမယ်
+                        ISNULL(E.[e_Payment_name], '') AS ePayment 
+                    FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
+                    LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
+                    LEFT JOIN [dbo].[D99_Category] AS C ON S.Currency_Code = C.cate_code
+                    LEFT JOIN [dbo].[D10_Hose] AS H ON S.Hose_ID = H.Hose_ID
+                    LEFT JOIN [dbo].[D10_Pump] AS D ON S.Pump_No = D.Pump_No
+                    LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
+                    LEFT JOIN [dbo].[D7_Counter] AS CT ON S.Counter_Code = CT.Counter_Code
+                    -- Sale Table နဲ့ Payment Table ကို VocNo နဲ့ ချိတ်မယ်
+                    LEFT JOIN [dbo].[D17_Sale_e_Payment] AS EP ON S.VocNo = EP.VocNo AND T.[Sale_Type_name] = 'ePayment'
+                    -- EP နဲ့ ချိတ်မိမှသာ Payment Name Table ကို ဆက်ချိတ်မယ်
+                    LEFT JOIN [dbo].[D14_e_Payment] AS E ON EP.e_Payment_ID = E.e_Payment_ID
+                    LEFT JOIN LatestPrices AS LP ON S.FuelTypeCode = LP.FuelTypeCode AND LP.rn = 1
+                    WHERE S.[S_Date] BETWEEN @start AND @end
+                    ORDER BY S.[S_Date] DESC;
+            `);
+        res.setHeader('X-Total-Count', result.recordset.length);
+        res.setHeader('Content-Type', 'application/json');
+        result.recordset.forEach((row, index) => {
+            res.write(JSON.stringify(row) + "\n"); // တစ်ကြောင်းချင်းစီကို Newline နဲ့ ပို့ခြင်း
+        });
+        res.end();
     } catch (err) {
         res.status(500).send(err.message);
     }
