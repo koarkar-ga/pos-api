@@ -26,6 +26,57 @@ app.get('/api/eho/send-count', async (req, res) => {
             `);
     res.json(result.recordset);
 });
+// health-check route
+app.get('/api/health', async (req, res) => {
+    try {
+        // ၁။ Database Connection ကို စစ်မယ်
+        let pool = await sql.connect(config);
+
+        // ရိုးရိုးရှင်းရှင်း query တစ်ခု စမ်းပစ်ကြည့်မယ်
+        await pool.request().query('SELECT 1');
+
+        // ၂။ အားလုံး အိုကေရင် success ပြန်မယ်
+        res.status(200).json({
+            status: 'online',
+            database: 'connected',
+            timestamp: new Date().toISOString()
+        });
+    } catch (err) {
+        // ၃။ တစ်ခုခု ချို့ယွင်းရင် (ဥပမာ DB တက်မလာရင်) error ပြန်မယ်
+        res.status(500).json({
+            status: 'offline',
+            database: 'disconnected',
+            error: err.message
+        });
+    }
+});
+
+// Fuel Types API
+app.get('/api/fueltypes', async (req, res) => {
+    try {
+        let pool = await sql.connect(config);
+        let result = await pool.request()
+            .query('SELECT FuelTypeCode, FuelTypeName, BuyPrice, SalePrice, maincode FROM [D1_FuelType]');
+
+        res.json(result.recordset);
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
+});
+
+
+// Sale Types API
+app.get('/api/saletypes', async (req, res) => {
+    try {
+        let pool = await sql.connect(config);
+        let result = await pool.request()
+            .query('SELECT Sale_Type_ID, Sale_Type_name FROM [d14_Saletype]');
+
+        res.json(result.recordset);
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
+});
 
 // sys_control ကို date range ဖြင့် ရှာဖွေသည့် API
 app.get('/api/system-control/search', async (req, res) => {
@@ -159,6 +210,7 @@ app.get('/api/sales/search', async (req, res) => {
         res.status(500).send(err.message);
     }
 });
+
 app.get('/api/salesdetail/search', async (req, res) => {
     try {
         const { startDate, endDate } = req.query;
@@ -216,6 +268,70 @@ app.get('/api/salesdetail/search', async (req, res) => {
     }
 });
 
+app.get('/api/summary/saletypes', async (req, res) => {
+    try {
+        let pool = await sql.connect(config);
+        let result = await pool.request()
+            .query(`
+                SELECT 
+                    T.[Sale_Type_name] as label, 
+                    SUM(S.[SALELITER]) as value 
+                FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
+                LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
+                WHERE 
+                        S.[S_Date] BETWEEN '2026-02-15 00:00:00' AND '2026-02-16 23:59:59'
+                GROUP BY T.[Sale_Type_name]
+            `);
+        res.json(result.recordset);
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
+});
+
+// ၂။ Fuel Sale Summary (Today)
+app.get('/api/summary/fuelsales', async (req, res) => {
+    try {
+        let pool = await sql.connect(config);
+        let result = await pool.request()
+            .query(`
+                SELECT 
+                    F.[FuelTypeName] as label, 
+                    SUM(S.[SALELITER]) as value 
+                FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
+                LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
+                WHERE 
+                        S.[S_Date] BETWEEN '2026-02-15 00:00:00' AND '2026-02-16 23:59:59'
+                GROUP BY F.[FuelTypeName]
+            `);
+        res.json(result.recordset);
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
+});
+
+// ၂။ Fuel Sale Summary (Today)
+app.get('/api/summary/data', async (req, res) => {
+    try {
+        let pool = await sql.connect(config);
+        let result = await pool.request()
+            .query(`
+                SELECT 
+                    -- ၁။ Total Sale Amount
+                    ISNULL(SUM(TotalPrice), 0) as totalAmount,
+                    -- ၂။ Total Sale Liter
+                    ISNULL(SUM(SALELITER), 0) as totalLiter,
+                    -- ၃။ Transaction Count (Total Rewards card အတွက် သုံးနိုင်တယ်)
+                    COUNT(VocNo) as totalTransactions
+                FROM [dbo].[D17_DailySale] WITH (NOLOCK)
+                WHERE CAST(S_Date AS DATE) = CAST(GETDATE() AS DATE)
+            `);
+
+        // တစ်ကြောင်းတည်းပဲ ထွက်မှာမို့လို့ recordset[0] ကို ပို့မယ်
+        res.json(result.recordset[0]);
+    } catch (err) {
+        res.status(500).send({ error: err.message });
+    }
+});
 // Server စတင်ခြင်း
 const PORT = 3000;
 app.listen(PORT, () => {
