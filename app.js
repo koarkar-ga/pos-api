@@ -1,17 +1,24 @@
-﻿const express = require('express');
+const express = require('express');
 const sql = require('mssql');
 const cors = require('cors');
+const fs = require('fs');
+const ini = require('ini');
+const path = require('path');
 
 const app = express();
 app.use(cors()); // Flutter မှ ချိတ်ဆက်နိုင်ရန်
 app.use(express.json());
 
+// Load Config from config.ini
+const configFilePath = path.join(__dirname, 'config.ini');
+const configData = ini.parse(fs.readFileSync(configFilePath, 'utf-8'));
+
 // MSSQL Connection Configuration
 const config = {
-    user: 'sa',
-    password: 'infosys2011iss@',
-    server: '43.242.135.98', // သို့မဟုတ် IP Address
-    database: 'M001',
+    user: configData.database.user,
+    password: configData.database.password,
+    server: configData.database.server,
+    database: configData.database.database,
     options: {
         encrypt: false, // SSL ပိတ်ထားခြင်း
         trustServerCertificate: true,
@@ -20,7 +27,7 @@ const config = {
         // Request Timeout ကို စက္ကန့် ၆၀ တိုးမယ် (Default က ၃၀ စက္ကန့်)
         requestTimeout: 60000
     },
-    port: 1433
+    port: parseInt(configData.database.port, 10) || 1433
 };
 
 app.get('/api/eho/send-count', async (req, res) => {
@@ -338,7 +345,7 @@ app.get('/api/summary/data', async (req, res) => {
     }
 });
 // Server စတင်ခြင်း
-const PORT = 3000;
+const PORT = parseInt(configData.server.port, 10) || 3000;
 app.listen(PORT, () => {
     console.log(`API Server running on http://localhost:${PORT}`);
 });
