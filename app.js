@@ -4,6 +4,7 @@ const cors = require('cors');
 const fs = require('fs');
 const ini = require('ini');
 const path = require('path');
+const ModbusRTU = require('modbus-serial');
 
 const app = express();
 app.use(cors()); // Flutter မှ ချိတ်ဆက်နိုင်ရန်
@@ -138,7 +139,7 @@ app.get('/api/sales/recent', async (req, res) => {
                 SELECT 
                         S.[VocNo], S.[S_Date], S.[Vehical_No],
                         C.[cate_name] AS Category,
-                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        S.[SALELITER], S.[TotalPrice], ISNULL(NULLIF(F.[FuelTypeName], ''), T.[Sale_Type_name]) AS FuelTypeName,
                         T.[Sale_Type_name],
                         (SELECT TOP 1 Price FROM [dbo].[D16_PetrolPrice] P 
                         WHERE P.FuelTypeCode = S.FuelTypeCode 
@@ -193,7 +194,7 @@ app.get('/api/sales/search', async (req, res) => {
                 SELECT 
                         S.[VocNo], S.[S_Date], S.[Vehical_No],
                         C.[cate_name] AS Category,
-                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        S.[SALELITER], S.[TotalPrice], ISNULL(NULLIF(F.[FuelTypeName], ''), T.[Sale_Type_name]) AS FuelTypeName,
                         T.[Sale_Type_name],
                         LP.[Price] AS TodayPrice,
                         H.[NZ_label] AS Nozzle,
@@ -259,7 +260,7 @@ app.get('/api/salesdetail/search', async (req, res) => {
                     SELECT 
                         S.[VocNo], S.[S_Date], S.[Vehical_No],
                         C.[cate_name] AS Category,
-                        S.[SALELITER], S.[TotalPrice], F.[FuelTypeName],
+                        S.[SALELITER], S.[TotalPrice], ISNULL(NULLIF(F.[FuelTypeName], ''), T.[Sale_Type_name]) AS FuelTypeName,
                         T.[Sale_Type_name],
                         LP.[Price] AS TodayPrice,
                         H.[NZ_label] AS Nozzle,
@@ -325,13 +326,14 @@ app.get('/api/summary/fuelsales', async (req, res) => {
         let result = await pool.request()
             .query(`
                 SELECT 
-                    F.[FuelTypeName] as label, 
+                    ISNULL(NULLIF(F.[FuelTypeName], ''), T.[Sale_Type_name]) as label, 
                     SUM(S.[SALELITER]) as value 
                 FROM [dbo].[D17_DailySale] AS S WITH (NOLOCK)
                 LEFT JOIN [dbo].[D1_FuelType] AS F ON S.FuelTypeCode = F.FuelTypeCode
+                LEFT JOIN [dbo].[d14_Saletype] AS T ON S.Sale_Type_ID = T.Sale_Type_ID
                 WHERE 
                         S.[S_Date] BETWEEN '2026-02-15 00:00:00' AND '2026-02-16 23:59:59'
-                GROUP BY F.[FuelTypeName]
+                GROUP BY ISNULL(NULLIF(F.[FuelTypeName], ''), T.[Sale_Type_name])
             `);
         res.json(result.recordset);
     } catch (err) {
@@ -555,8 +557,81 @@ app.get('/api/debug/columns/:table', async (req, res) => {
     }
 });
 
+// --- Sensor Monitoring Logic ---
+let sensorData = [];
+const sensorConfig = configData.sensor || {};
+
+const decodeFloat = (high, low) => {
+    const buffer = Buffer.alloc(4);
+    buffer.writeUInt16BE(high, 0);
+    buffer.writeUInt16BE(low, 2);
+    return buffer.readFloatBE(0);
+};
+
+const pollSensors = async () => {
+    if (sensorConfig.enable !== 'on') return;
+
+    const client = new ModbusRTU();
+    const ttyPath = sensorConfig.com_port || '/dev/tty.usbserial-10';
+    const tankCount = parseInt(sensorConfig.tank_count, 10) || 1;
+    const capacities = (sensorConfig.tank_levels || "").split(',').map(v => parseFloat(v.trim()));
+
+    try {
+        await client.connectRTUBuffered(ttyPath, { baudRate: 9600 });
+        console.log(`Connected to Sensor Modbus on ${ttyPath}`);
+
+        while (true) {
+            let currentData = [];
+            for (let i = 1; i <= tankCount; i++) {
+                try {
+                    const tankInfo = sensorConfig[`tank-${i}`] || "";
+                    const parts = tankInfo.split(',').map(p => p.trim());
+                    const capacity = parseFloat(parts[0]) || 0;
+                    const fuelName = parts[1] || 'Unknown';
+                    const tankName = parts[2] || `Tank - ${i}`;
+
+                    client.setID(i);
+                    const res = await client.readHoldingRegisters(0, 6);
+                    
+                    const level = decodeFloat(res.data[0], res.data[1]);
+                    const water = decodeFloat(res.data[2], res.data[3]);
+                    const temp = decodeFloat(res.data[4], res.data[5]);
+
+                    currentData.push({
+                        tankNo: i,
+                        tankName: tankName,
+                        fuelName: fuelName,
+                        level: level,
+                        water: water,
+                        temperature: temp,
+                        capacity: capacity,
+                        percentage: capacity > 0 ? (level / capacity * 100).toFixed(2) : 0,
+                        lastUpdated: new Date().toISOString()
+                    });
+                } catch (err) {
+                    console.error(`Error reading Tank ${i}:`, err.message);
+                }
+            }
+            sensorData = currentData;
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    } catch (err) {
+        console.error("Sensor Modbus connection error:", err.message);
+        setTimeout(pollSensors, 5000); // Retry after 5 seconds
+    } finally {
+        if (client.isOpen) client.close();
+    }
+};
+
+app.get('/api/sensors', (req, res) => {
+    res.json(sensorData);
+});
+
 // Server စတင်ခြင်း
 const PORT = parseInt(configData.server.port, 10) || 3000;
 app.listen(PORT, () => {
     console.log(`API Server running on http://localhost:${PORT}`);
+    if (sensorConfig.enable === 'on') {
+        pollSensors();
+    }
 });
